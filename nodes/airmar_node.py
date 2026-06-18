@@ -1,198 +1,165 @@
 #!/usr/bin/env python3
-"""
-ROS2 Jazzy driver node for Airmar 150WXRS WeatherStation
-Serial: RS232, 4800 baud, 8N1
+import json
+import threading
+import time
 
-Topics published:
-  /airmar/wind          [geometry_msgs/Vector3]  direction (deg), speed (knots), speed (m/s)
-  /airmar/weather       [sensor_msgs/FluidPressure + std_msgs/Float32MultiArray]
-  /airmar/heading       [std_msgs/Float32]        magnetic heading (deg)
-  /airmar/orientation   [geometry_msgs/Vector3]   pitch, roll (deg)
-  /airmar/rain          [std_msgs/Float32MultiArray] amount(mm), duration(s), rate(mm/h)
-  /airmar/gps           [sensor_msgs/NavSatFix]   GPS fix (when available)
-  /airmar/pressure      [sensor_msgs/FluidPressure]
-  /airmar/temperature   [sensor_msgs/Temperature]
-  /airmar/humidity      [std_msgs/Float32]
-"""
-
-import serial
-import pynmea2
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import Float32, Float32MultiArray
-from geometry_msgs.msg import Vector3
-from sensor_msgs.msg import NavSatFix, FluidPressure, Temperature
+from std_msgs.msg import String
+
+from .airmar_driver import (
+    AirmarDriver,
+    WindData,
+    HeadingData,
+    WeatherData,
+    OrientationData,
+    RainData,
+    GPSData,
+)
 
 
-class Airmar150WXRSNode(Node):
-
+class AirmarNode(Node):
     def __init__(self):
         super().__init__('airmar_150wxrs')
 
-        # Parameters
         self.declare_parameter('port', '/dev/ttyUSB0')
-        self.declare_parameter('baudrate', 4800)
+        self.declare_parameter('baud', 4800)
+        self.declare_parameter('sample_interval', 0.0)
 
-        port     = self.get_parameter('port').get_parameter_value().string_value
-        baudrate = self.get_parameter('baudrate').get_parameter_value().integer_value
+        self._port = self.get_parameter('port').value
+        self._baud = self.get_parameter('baud').value
+        self._interval = float(self.get_parameter('sample_interval').value)
 
-        # Publishers
-        self.pub_wind        = self.create_publisher(Vector3,           '/airmar/wind',        10)
-        self.pub_heading     = self.create_publisher(Float32,           '/airmar/heading',     10)
-        self.pub_orientation = self.create_publisher(Vector3,           '/airmar/orientation', 10)
-        self.pub_rain        = self.create_publisher(Float32MultiArray, '/airmar/rain',        10)
-        self.pub_pressure    = self.create_publisher(FluidPressure,     '/airmar/pressure',    10)
-        self.pub_temperature = self.create_publisher(Temperature,       '/airmar/temperature', 10)
-        self.pub_humidity    = self.create_publisher(Float32,           '/airmar/humidity',    10)
-        self.pub_gps         = self.create_publisher(NavSatFix,         '/airmar/gps',         10)
+        self._pub = self.create_publisher(String, 'airmar/data', 10)
+        self.get_logger().info(
+            f"Airmar node démarré — port={self._port} baud={self._baud} interval={self._interval} s"
+        )
 
-        # Serial connection
+        self._reconnect = False
+        self.create_subscription(String, 'airmar/set_port', self._cb_set_port, 10)
+
+        self._running = True
+        threading.Thread(target=self._loop, daemon=True).start()
+
+    def _cb_set_port(self, msg: String) -> None:
         try:
-            self.ser = serial.Serial(port, baudrate, timeout=1)
-            self.get_logger().info(f'Connected to {port} @ {baudrate} baud')
-        except serial.SerialException as e:
-            self.get_logger().error(f'Failed to open serial port: {e}')
-            raise
-
-        # Read loop timer (10 Hz)
-        self.create_timer(0.1, self.read_serial)
-
-    def read_serial(self):
-        try:
-            raw = self.ser.readline().decode('ascii', errors='replace').strip()
-            if not raw.startswith('$'):
-                return
-            self.parse_nmea(raw)
-        except Exception as e:
-            self.get_logger().warn(f'Serial read error: {e}')
-
-    def parse_nmea(self, raw: str):
-        try:
-            msg = pynmea2.parse(raw)
-        except pynmea2.ParseError:
+            cfg = json.loads(msg.data)
+        except json.JSONDecodeError as e:
+            self.get_logger().warn(f"set_port JSON invalide : {e}")
             return
+        self._port = cfg.get('port', self._port)
+        try:
+            self._baud = int(cfg.get('baud', self._baud))
+        except (TypeError, ValueError):
+            pass
+        self._reconnect = True
+        self.get_logger().info(f"Changement de port demandé → {self._port} @ {self._baud}")
 
-        sentence = msg.sentence_type
+    def _sleep(self, seconds: float) -> None:
+        for _ in range(int(seconds / 0.1)):
+            if not self._running or self._reconnect:
+                return
+            time.sleep(0.1)
 
-        # --- Wind ($WIMWV) ---
-        if sentence == 'MWV':
-            try:
-                direction = float(msg.wind_angle)
-                speed_kn  = float(msg.wind_speed)
-                speed_ms  = speed_kn * 0.514444
-                wind_msg = Vector3()
-                wind_msg.x = direction   # degrees
-                wind_msg.y = speed_kn    # knots
-                wind_msg.z = speed_ms    # m/s
-                self.pub_wind.publish(wind_msg)
-            except (ValueError, AttributeError):
-                pass
+    def _publish(self, payload: dict) -> None:
+        msg = String()
+        msg.data = json.dumps(payload)
+        self._pub.publish(msg)
 
-        # --- Heading ($HCHDG) ---
-        elif sentence == 'HDG':
-            try:
-                heading = float(msg.heading)
-                h_msg = Float32()
-                h_msg.data = heading
-                self.pub_heading.publish(h_msg)
-            except (ValueError, AttributeError):
-                pass
+    def _fmt_num(self, val, unit: str, fmt: str) -> dict:
+        if val is None:
+            return {'value': None, 'unit': unit, 'display': 'N/A'}
+        return {'value': val, 'unit': unit, 'display': format(val, fmt)}
 
-        # --- Meteo ($WIMDA): pressure, temp, humidity ---
-        elif sentence == 'MDA':
-            try:
-                pressure_bar = float(msg.b_pressure_bar)
-                p_msg = FluidPressure()
-                p_msg.header.stamp = self.get_clock().now().to_msg()
-                p_msg.fluid_pressure = pressure_bar * 1e5  # Pa
-                self.pub_pressure.publish(p_msg)
-            except (ValueError, AttributeError):
-                pass
-            try:
-                temp_c = float(msg.air_temp)
-                t_msg = Temperature()
-                t_msg.header.stamp = self.get_clock().now().to_msg()
-                t_msg.temperature = temp_c
-                self.pub_temperature.publish(t_msg)
-            except (ValueError, AttributeError):
-                pass
-            try:
-                humidity = float(msg.rel_humidity)
-                hu_msg = Float32()
-                hu_msg.data = humidity
-                self.pub_humidity.publish(hu_msg)
-            except (ValueError, AttributeError):
-                pass
+    def _build_fields(self, sample) -> dict:
+        fields = {}
 
-        # --- Pitch & Roll ($YXXDR) ---
-        elif sentence == 'XDR':
-            try:
-                data = msg.data
-                pitch, roll = None, None
-                i = 0
-                while i < len(data) - 3:
-                    if data[i+3] == 'PTCH':
-                        pitch = float(data[i+1])
-                    elif data[i+3] == 'ROLL':
-                        roll = float(data[i+1])
-                    i += 4
-                if pitch is not None and roll is not None:
-                    o_msg = Vector3()
-                    o_msg.x = pitch
-                    o_msg.y = roll
-                    self.pub_orientation.publish(o_msg)
-            except (ValueError, AttributeError, IndexError):
-                pass
+        if isinstance(sample, WindData):
+            fields['wind_direction_deg'] = self._fmt_num(round(sample.direction_deg, 1), '°', '.1f')
+            fields['wind_speed_kn'] = self._fmt_num(round(sample.speed_kn, 1), 'kn', '.1f')
+            fields['wind_speed_ms'] = self._fmt_num(round(sample.speed_ms, 2), 'm/s', '.2f')
 
-        # --- Rain ($WIXDR) ---
-        elif sentence == 'IXDR' or (sentence == 'XDR' and 'RAIN' in raw):
-            try:
-                data = msg.data
-                amount, duration, rate = 0.0, 0.0, 0.0
-                i = 0
-                while i < len(data) - 3:
-                    if data[i+3] == 'RAIN':
-                        amount = float(data[i+1])
-                    elif data[i+3] == 'DURA':
-                        duration = float(data[i+1])
-                    elif data[i+3] == 'RATE':
-                        rate = float(data[i+1])
-                    i += 4
-                r_msg = Float32MultiArray()
-                r_msg.data = [amount, duration, rate]
-                self.pub_rain.publish(r_msg)
-            except (ValueError, AttributeError, IndexError):
-                pass
+        elif isinstance(sample, HeadingData):
+            fields['heading_deg'] = self._fmt_num(round(sample.heading_deg, 1), '°', '.1f')
 
-        # --- GPS ($GPGGA) ---
-        elif sentence == 'GGA':
-            try:
-                if msg.gps_qual > 0:
-                    gps_msg = NavSatFix()
-                    gps_msg.header.stamp = self.get_clock().now().to_msg()
-                    gps_msg.latitude  = msg.latitude
-                    gps_msg.longitude = msg.longitude
-                    gps_msg.altitude  = float(msg.altitude)
-                    self.pub_gps.publish(gps_msg)
-            except (ValueError, AttributeError):
-                pass
+        elif isinstance(sample, WeatherData):
+            if sample.pressure_pa is not None:
+                fields['pressure_hpa'] = self._fmt_num(round(sample.pressure_pa / 100.0, 1), 'hPa', '.1f')
+            if sample.air_temp_c is not None:
+                fields['temperature_c'] = self._fmt_num(round(sample.air_temp_c, 1), '°C', '.1f')
+            if sample.humidity_pct is not None:
+                fields['humidity_pct'] = self._fmt_num(round(sample.humidity_pct, 1), '%', '.1f')
 
-    def destroy_node(self):
-        if hasattr(self, 'ser') and self.ser.is_open:
-            self.ser.close()
+        elif isinstance(sample, OrientationData):
+            fields['pitch_deg'] = self._fmt_num(round(sample.pitch_deg, 2), '°', '.2f')
+            fields['roll_deg'] = self._fmt_num(round(sample.roll_deg, 2), '°', '.2f')
+
+        elif isinstance(sample, RainData):
+            fields['rain_amount_mm'] = self._fmt_num(round(sample.amount_mm, 2), 'mm', '.2f')
+            fields['rain_duration_s'] = self._fmt_num(round(sample.duration_s, 0), 's', '.0f')
+            fields['rain_rate_mmh'] = self._fmt_num(round(sample.rate_mm_h, 1), 'mm/h', '.1f')
+
+        elif isinstance(sample, GPSData):
+            fields['gps_latitude'] = self._fmt_num(round(sample.latitude, 6), '°', '.6f')
+            fields['gps_longitude'] = self._fmt_num(round(sample.longitude, 6), '°', '.6f')
+            fields['gps_altitude'] = self._fmt_num(round(sample.altitude_m, 1), 'm', '.1f')
+
+        return fields
+
+    def _loop(self) -> None:
+        while self._running:
+            try:
+                self._reconnect = False
+                driver = AirmarDriver(self._port, self._baud)
+                driver.open()
+                self.get_logger().info(f"Port série ouvert — {self._port} @ {self._baud}")
+
+                last_pub = 0.0
+                for sample in driver.stream():
+                    if not self._running or self._reconnect:
+                        break
+
+                    now = time.time()
+                    if self._interval > 0 and now - last_pub < self._interval:
+                        continue
+                    last_pub = now
+
+                    fields = self._build_fields(sample)
+                    if not fields:
+                        continue
+
+                    self._publish({
+                        'status': 'ok',
+                        'timestamp': time.strftime('%H:%M:%S'),
+                        'fields': fields,
+                    })
+                    self.get_logger().info(f"Airmar OK — {list(fields.keys())}")
+
+                driver.close()
+
+            except Exception as e:
+                self.get_logger().error(f"Erreur Airmar : {e}")
+                self._publish({'status': 'error', 'error': str(e)})
+                self._sleep(5.0)
+
+    def destroy_node(self) -> None:
+        self._running = False
         super().destroy_node()
 
 
 def main(args=None):
     rclpy.init(args=args)
-    node = Airmar150WXRSNode()
+    node = AirmarNode()
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        try:
+            rclpy.shutdown()
+        except Exception:
+            pass
 
 
 if __name__ == '__main__':
