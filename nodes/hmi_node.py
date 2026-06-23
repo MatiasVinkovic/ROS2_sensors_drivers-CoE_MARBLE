@@ -86,35 +86,43 @@ class SensorPanel(tk.Frame):
             bar = tk.Frame(self, bg=HEADER_BG)
             bar.pack(fill=tk.X)
 
-            tk.Label(bar, text="Port :", bg=HEADER_BG, font=FONT_LABEL,
-                     fg=TEXT_DIM).pack(side=tk.LEFT, padx=(10, 3), pady=4)
-            self._port_var = tk.StringVar()
-            self._port_combo = ttk.Combobox(bar, textvariable=self._port_var,
-                                            width=13, font=FONT_LABEL)
-            self._port_combo.pack(side=tk.LEFT, pady=4)
+            row1 = tk.Frame(bar, bg=HEADER_BG)
+            row1.pack(fill=tk.X)
+            row2 = tk.Frame(bar, bg=HEADER_BG)
+            row2.pack(fill=tk.X)
 
-            tk.Label(bar, text="Baud :", bg=HEADER_BG, font=FONT_LABEL,
-                     fg=TEXT_DIM).pack(side=tk.LEFT, padx=(8, 3), pady=4)
+            tk.Label(row1, text="Port :", bg=HEADER_BG, font=FONT_LABEL,
+                     fg=TEXT_DIM).pack(side=tk.LEFT, padx=(10, 3), pady=(4, 2))
+            self._port_var = tk.StringVar()
+            self._port_combo = ttk.Combobox(row1, textvariable=self._port_var,
+                                            width=13, font=FONT_LABEL)
+            self._port_combo.pack(side=tk.LEFT, pady=(4, 2))
+
+            tk.Label(row1, text="Baud :", bg=HEADER_BG, font=FONT_LABEL,
+                     fg=TEXT_DIM).pack(side=tk.LEFT, padx=(8, 3), pady=(4, 2))
             self._baud_var = tk.StringVar(value=str(default_baud))
-            ttk.Combobox(bar, textvariable=self._baud_var, width=7,
+            ttk.Combobox(row1, textvariable=self._baud_var, width=7,
                          values=('1200', '2400', '4800', '9600', '19200',
                                  '38400', '57600', '115200', '230400'),
-                         font=FONT_LABEL).pack(side=tk.LEFT, pady=4)
+                         font=FONT_LABEL).pack(side=tk.LEFT, pady=(4, 2))
 
-            tk.Button(bar, text="↻", command=self._refresh_ports,
+            tk.Button(row2, text="↻ Rafraîchir", command=self._refresh_ports,
                       bg=PANEL_BG, fg=TEXT_VAL, font=FONT_LABEL,
                       activebackground=BORDER, activeforeground=TEXT_VAL,
-                      relief=tk.FLAT, padx=6).pack(side=tk.LEFT, padx=(8, 0), pady=4)
-            tk.Button(bar, text="Connecter", command=self._do_connect,
-                      bg=COL_GREEN, fg=BG, font=FONT_LABEL,
+                      relief=tk.FLAT, padx=8, pady=3,
+                      cursor="hand2").pack(side=tk.LEFT, padx=(10, 6), pady=(2, 6))
+            tk.Button(row2, text="▶ Connecter", command=self._do_connect,
+                      bg=COL_GREEN, fg=BG, font=("Consolas", 9, "bold"),
                       activebackground=TEXT_SECTION, activeforeground=BG,
-                      relief=tk.FLAT, padx=8).pack(side=tk.LEFT, padx=(6, 4), pady=4)
+                      relief=tk.FLAT, padx=10, pady=3,
+                      cursor="hand2").pack(side=tk.LEFT, padx=(0, 6), pady=(2, 6))
 
             if on_stop is not None:
-                tk.Button(bar, text="■", command=on_stop,
+                tk.Button(row2, text="■ Stop", command=on_stop,
                           bg=PANEL_BG, fg=COL_RED, font=FONT_LABEL,
                           activebackground=BORDER, activeforeground=COL_RED,
-                          relief=tk.FLAT, padx=6).pack(side=tk.LEFT, padx=(0, 10), pady=4)
+                          relief=tk.FLAT, padx=8, pady=3,
+                          cursor="hand2").pack(side=tk.LEFT, padx=(0, 10), pady=(2, 6))
 
             self._refresh_ports()
 
@@ -323,12 +331,42 @@ class HMIApp:
         ]),
     ]
 
+    # Définition des groupes Airmar 150WXRS
+    AIRMAR_GROUPS = [
+        ("Vent", [
+            ("wind_direction_deg", "Direction",      "°"),
+            ("wind_speed_kn",      "Vitesse",         "kn"),
+            ("wind_speed_ms",      "Vitesse",         "m/s"),
+        ]),
+        ("Météo", [
+            ("pressure_hpa",   "Pression",   "hPa"),
+            ("temperature_c",  "Température", "°C"),
+            ("humidity_pct",   "Humidité",    "%"),
+        ]),
+        ("Orientation", [
+            ("heading_deg", "Cap (Heading)", "°"),
+            ("pitch_deg",   "Pitch",         "°"),
+            ("roll_deg",    "Roll",          "°"),
+        ]),
+        ("Pluie", [
+            ("rain_amount_mm",   "Cumul",      "mm"),
+            ("rain_duration_s",  "Durée",      "s"),
+            ("rain_rate_mmh",    "Intensité",  "mm/h"),
+        ]),
+        ("GPS", [
+            ("gps_latitude",  "Latitude",  "°"),
+            ("gps_longitude", "Longitude", "°"),
+            ("gps_altitude",  "Altitude",  "m"),
+        ]),
+    ]
+
     # Exécutables ros2 de chaque capteur (lancés au clic sur Connecter)
     _EXES = {
         'aanderaa': 'aanderaa_node',
         'aquadopp': 'aquadopp_node',
         'sbe37':    'sbe37_node',
         'rbrcoda3': 'rbrcoda3_node',
+        'airmar':   'airmar_node',
     }
 
     def __init__(self, node: 'SensorsHMINode'):
@@ -338,8 +376,29 @@ class HMIApp:
         self._root = tk.Tk()
         self._root.title("MARBLE — Sensors Monitor")
         self._root.configure(bg=BG)
-        self._root.geometry("2100x800")
         self._root.resizable(True, True)
+
+        # Démarre maximisé à la taille de l'écran (jamais de boutons hors-écran)
+        zoomed = False
+        try:
+            self._root.state('zoomed')          # Windows / certains DE Linux
+            zoomed = True
+        except tk.TclError:
+            pass
+        if not zoomed:
+            try:
+                self._root.attributes('-zoomed', True)   # X11 / GNOME / etc.
+                zoomed = True
+            except tk.TclError:
+                pass
+
+        self._root.update_idletasks()
+        sw = self._root.winfo_screenwidth()
+        sh = self._root.winfo_screenheight()
+        # Garde-fou : si le WM n'a pas réellement agrandi la fenêtre
+        # (ex. pas de window manager), on force une géométrie plein écran.
+        if self._root.winfo_width() < sw * 0.8 or self._root.winfo_height() < sh * 0.8:
+            self._root.geometry(f"{sw}x{sh}+0+0")
 
         # ── Titre ─────────────────────────────────────────────────────────────
         top_bar = tk.Frame(self._root, bg=HEADER_BG)
@@ -348,42 +407,89 @@ class HMIApp:
                  bg=HEADER_BG, font=("Consolas", 14, "bold"),
                  fg=TEXT_VAL, pady=10).pack(side=tk.LEFT, padx=14)
 
-        # ── Colonnes ──────────────────────────────────────────────────────────
-        cols = tk.Frame(self._root, bg=BG)
-        cols.pack(fill=tk.BOTH, expand=True, padx=10, pady=8)
-        cols.columnconfigure(0, weight=3)  # AANDERAA (plus de champs)
-        cols.columnconfigure(1, weight=2)  # Aquadopp
-        cols.columnconfigure(2, weight=2)  # SBE 37-SIP
-        cols.columnconfigure(3, weight=1)  # RBRcoda3
+        close_btn = tk.Button(top_bar, text="✕  Fermer", command=self._on_close,
+                               bg=COL_RED, fg="#ffffff", font=("Consolas", 10, "bold"),
+                               activebackground="#ff6b6b", activeforeground="#ffffff",
+                               relief=tk.FLAT, padx=12, pady=4, cursor="hand2")
+        close_btn.pack(side=tk.RIGHT, padx=14, pady=8)
+
+        tk.Label(top_bar, text="◀ ▶  molette / shift+molette pour défiler",
+                 bg=HEADER_BG, font=FONT_CLOCK, fg=TEXT_DIM
+                 ).pack(side=tk.RIGHT, padx=14)
+
+        # ── Zone des panneaux, scrollable horizontalement ───────────────────────
+        # Évite que des panneaux (et leurs boutons) soient coupés si la fenêtre
+        # est plus petite que la somme des largeurs minimales des panneaux.
+        outer = tk.Frame(self._root, bg=BG)
+        outer.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+
+        h_canvas = tk.Canvas(outer, bg=BG, highlightthickness=0, bd=0)
+        h_scroll = ttk.Scrollbar(outer, orient="horizontal", command=h_canvas.xview)
+        h_canvas.configure(xscrollcommand=h_scroll.set)
+        h_canvas.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        h_scroll.pack(side=tk.BOTTOM, fill=tk.X)
+
+        cols = tk.Frame(h_canvas, bg=BG)
+        cols_win = h_canvas.create_window((0, 0), window=cols, anchor="nw")
+
+        def _on_cols_configure(event):
+            h_canvas.configure(scrollregion=h_canvas.bbox("all"))
+        def _on_canvas_resize(event):
+            # La zone de panneaux ne descend jamais sous la hauteur visible
+            h_canvas.itemconfig(cols_win, height=event.height)
+        def _on_h_wheel(event):
+            # Molette = défilement horizontal direct (pas besoin de Shift)
+            h_canvas.xview_scroll(-1 * (event.delta // 120), "units")
+
+        cols.bind("<Configure>", _on_cols_configure)
+        h_canvas.bind("<Configure>", _on_canvas_resize)
+        h_canvas.bind("<MouseWheel>", _on_h_wheel)
+        h_canvas.bind("<Shift-MouseWheel>", _on_h_wheel)
+
         cols.rowconfigure(0, weight=1)
+        # Largeur minimale par panneau pour que Port/Baud/Connecter/Stop
+        # restent toujours entièrement visibles et cliquables.
+        PANEL_MIN_WIDTH = 340
 
         self._a_panel = SensorPanel(
             cols, "AANDERAA Motus Wave Sensor 5729", self.AANDERAA_GROUPS,
             on_connect=lambda p, b: self._connect('aanderaa', p, b),
             on_stop=lambda: self._stop('aanderaa'),
-            default_baud=115200)
-        self._a_panel.grid(row=0, column=0, sticky="nsew", padx=(0, 5))
+            default_baud=115200, width=int(PANEL_MIN_WIDTH * 1.3))
+        self._a_panel.pack_propagate(False)
+        self._a_panel.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 5))
 
         self._q_panel = SensorPanel(
             cols, "Aquadopp S4VP", self.AQUADOPP_GROUPS,
             on_connect=lambda p, b: self._connect('aquadopp', p, b),
             on_stop=lambda: self._stop('aquadopp'),
-            default_baud=115200)
-        self._q_panel.grid(row=0, column=1, sticky="nsew", padx=(5, 5))
+            default_baud=115200, width=PANEL_MIN_WIDTH)
+        self._q_panel.pack_propagate(False)
+        self._q_panel.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 5))
 
         self._s_panel = SensorPanel(
             cols, "SBE 37-SIP MicroCAT", self.SBE37_GROUPS,
             on_connect=lambda p, b: self._connect('sbe37', p, b),
             on_stop=lambda: self._stop('sbe37'),
-            default_baud=9600)
-        self._s_panel.grid(row=0, column=2, sticky="nsew", padx=(5, 5))
+            default_baud=9600, width=PANEL_MIN_WIDTH)
+        self._s_panel.pack_propagate(False)
+        self._s_panel.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 5))
 
         self._r_panel = SensorPanel(
             cols, "RBRcoda3", self.RBR_GROUPS,
             on_connect=lambda p, b: self._connect('rbrcoda3', p, b),
             on_stop=lambda: self._stop('rbrcoda3'),
-            default_baud=9600)
-        self._r_panel.grid(row=0, column=3, sticky="nsew", padx=(5, 0))
+            default_baud=9600, width=PANEL_MIN_WIDTH)
+        self._r_panel.pack_propagate(False)
+        self._r_panel.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 5))
+
+        self._air_panel = SensorPanel(
+            cols, "Airmar 150WXRS", self.AIRMAR_GROUPS,
+            on_connect=lambda p, b: self._connect('airmar', p, b),
+            on_stop=lambda: self._stop('airmar'),
+            default_baud=4800, width=PANEL_MIN_WIDTH)
+        self._air_panel.pack_propagate(False)
+        self._air_panel.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 0))
 
         # ── Barre du bas ──────────────────────────────────────────────────────
         bot = tk.Frame(self._root, bg=HEADER_BG, pady=3)
@@ -397,13 +503,15 @@ class HMIApp:
                  ).pack(side=tk.RIGHT, padx=12)
 
         self._root.protocol("WM_DELETE_WINDOW", self._on_close)
+        self._root.bind("<Escape>", lambda e: self._on_close())
         self._root.after(500, self._tick)
 
     # ── Lancement / arrêt des nodes capteurs ──────────────────────────────────
 
     def _panel_of(self, sensor: str) -> SensorPanel:
         return {'aanderaa': self._a_panel, 'aquadopp': self._q_panel,
-                'sbe37': self._s_panel, 'rbrcoda3': self._r_panel}[sensor]
+                'sbe37': self._s_panel, 'rbrcoda3': self._r_panel,
+                'airmar': self._air_panel}[sensor]
 
     def _connect(self, sensor: str, port: str, baud: int) -> None:
         """Clic sur Connecter : lance le node s'il ne tourne pas, sinon
@@ -448,7 +556,7 @@ class HMIApp:
 
     def _tick(self) -> None:
         self._clock_var.set(time.strftime("%Y-%m-%d  %H:%M:%S"))
-        a_data, q_data, s_data, r_data = self._node.get_data()
+        a_data, q_data, s_data, r_data, air_data = self._node.get_data()
         if a_data:
             self._a_panel.update_data(a_data)
         if q_data:
@@ -457,6 +565,8 @@ class HMIApp:
             self._s_panel.update_data(s_data)
         if r_data:
             self._r_panel.update_data(r_data)
+        if air_data:
+            self._air_panel.update_data(air_data)
         self._root.after(500, self._tick)
 
     def _on_close(self) -> None:
@@ -487,12 +597,14 @@ class SensorsHMINode(Node):
         self._aquadopp  = None
         self._sbe37     = None
         self._rbrcoda3  = None
+        self._airmar    = None
         self._last_rx   = {}   # sensor → instant du dernier message reçu
 
         self.create_subscription(String, 'aanderaa/data',  self._cb_aanderaa,  10)
         self.create_subscription(String, 'aquadopp/data',  self._cb_aquadopp,  10)
         self.create_subscription(String, 'sbe37/data',     self._cb_sbe37,     10)
         self.create_subscription(String, 'rbrcoda3/data',  self._cb_rbrcoda3,  10)
+        self.create_subscription(String, 'airmar/data',    self._cb_airmar,    10)
 
         # Publishers pour demander aux nodes de changer de port à chaud
         self._port_pubs = {
@@ -500,6 +612,7 @@ class SensorsHMINode(Node):
             'aquadopp': self.create_publisher(String, 'aquadopp/set_port', 10),
             'sbe37':    self.create_publisher(String, 'sbe37/set_port',    10),
             'rbrcoda3': self.create_publisher(String, 'rbrcoda3/set_port', 10),
+            'airmar':   self.create_publisher(String, 'airmar/set_port',   10),
         }
 
         self.get_logger().info("HMI node démarré — en attente des données capteurs")
@@ -547,6 +660,14 @@ class SensorsHMINode(Node):
         except json.JSONDecodeError as e:
             self.get_logger().warn(f"JSON RBRcoda3 invalide : {e}")
 
+    def _cb_airmar(self, msg: String) -> None:
+        self._last_rx['airmar'] = time.time()
+        try:
+            with self._lock:
+                self._airmar = json.loads(msg.data)
+        except json.JSONDecodeError as e:
+            self.get_logger().warn(f"JSON Airmar invalide : {e}")
+
     def get_data(self):
         with self._lock:
             return (
@@ -554,6 +675,7 @@ class SensorsHMINode(Node):
                 dict(self._aquadopp)  if self._aquadopp  else {},
                 dict(self._sbe37)     if self._sbe37     else {},
                 dict(self._rbrcoda3)  if self._rbrcoda3  else {},
+                dict(self._airmar)    if self._airmar    else {},
             )
 
 
