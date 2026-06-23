@@ -6,8 +6,9 @@ Souscrit à :
   /aanderaa/data   (std_msgs/String, JSON)
   /aquadopp/data   (std_msgs/String, JSON)
   /sbe37/data      (std_msgs/String, JSON)
+  /oculus/data     (std_msgs/String, JSON + image sonar)
 
-Affiche une fenêtre avec trois panneaux côte à côte.
+Affiche une fenêtre avec les panneaux capteurs + image sonar Oculus.
 rclpy.spin() tourne dans un thread séparé ; tkinter dans le thread principal.
 """
 
@@ -24,8 +25,17 @@ import signal
 import subprocess
 import time
 import sys
+import math
+import base64
+
+import numpy as np
+from PIL import Image as PILImage, ImageTk, ImageDraw
 
 from serial.tools import list_ports
+
+from marble_sensors_hmi.drivers.oculus_driver import (
+    build_fan_lut, make_sonar_colormap, enhance_image, FOV_DEG
+)
 
 # ─── Palette ─────────────────────────────────────────────────────────────────
 
@@ -241,6 +251,215 @@ class SensorPanel(tk.Frame):
             self._status_var.set("En attente du capteur...")
 
 
+# ─── OculusPanel ─────────────────────────────────────────────────────────────
+
+SONAR_COLORMAP = make_sonar_colormap()
+
+
+class OculusPanel(tk.Frame):
+    """Panneau d'affichage pour le sonar Oculus M750d avec image en eventail."""
+
+    FILTER_MODES = ['auto', 'log', 'sqrt', 'histeq', 'raw']
+    FILTER_LABELS = {
+        'auto': 'Auto', 'log': 'Log', 'sqrt': 'Sqrt',
+        'histeq': 'HistEq', 'raw': 'Brut',
+    }
+
+    def __init__(self, parent, on_connect=None, on_stop=None, **kw):
+        super().__init__(parent, bg=PANEL_BG,
+                         highlightbackground=BORDER, highlightthickness=1, **kw)
+        self._on_connect = on_connect
+        self._fan_lut = None
+        self._fan_size = (0, 0)
+        self._photo = None
+        self._mode = 'auto'
+        self._use_color = True
+        self._frame_count = 0
+
+        # En-tete
+        hdr = tk.Frame(self, bg=HEADER_BG)
+        hdr.pack(fill=tk.X)
+        self._dot = tk.Label(hdr, text="●", bg=HEADER_BG,
+                             font=("Consolas", 11), fg=COL_RED)
+        self._dot.pack(side=tk.LEFT, padx=(10, 4), pady=7)
+        tk.Label(hdr, text="OCULUS M750d Imaging Sonar", bg=HEADER_BG,
+                 font=FONT_TITLE, fg=TEXT_VAL).pack(side=tk.LEFT, pady=7)
+        self._ts_var = tk.StringVar(value="--:--:--")
+        tk.Label(hdr, textvariable=self._ts_var, bg=HEADER_BG,
+                 font=FONT_CLOCK, fg=TEXT_DIM).pack(side=tk.RIGHT, padx=10, pady=7)
+
+        # Barre IP (au lieu du port serie)
+        if on_connect is not None:
+            bar = tk.Frame(self, bg=HEADER_BG)
+            bar.pack(fill=tk.X)
+            tk.Label(bar, text="IP :", bg=HEADER_BG, font=FONT_LABEL,
+                     fg=TEXT_DIM).pack(side=tk.LEFT, padx=(10, 3), pady=4)
+            self._ip_var = tk.StringVar(value="169.254.106.24")
+            tk.Entry(bar, textvariable=self._ip_var, width=16,
+                     font=FONT_LABEL).pack(side=tk.LEFT, pady=4)
+            tk.Button(bar, text="▶ Connecter", command=self._do_connect,
+                      bg=COL_GREEN, fg=BG, font=("Consolas", 9, "bold"),
+                      activebackground=TEXT_SECTION, activeforeground=BG,
+                      relief=tk.FLAT, padx=10, pady=3,
+                      cursor="hand2").pack(side=tk.LEFT, padx=6, pady=4)
+            if on_stop is not None:
+                tk.Button(bar, text="■ Stop", command=on_stop,
+                          bg=PANEL_BG, fg=COL_RED, font=FONT_LABEL,
+                          activebackground=BORDER, activeforeground=COL_RED,
+                          relief=tk.FLAT, padx=8, pady=3,
+                          cursor="hand2").pack(side=tk.LEFT, pady=4)
+
+        # Barre de filtres
+        fbar = tk.Frame(self, bg=HEADER_BG)
+        fbar.pack(fill=tk.X)
+        tk.Label(fbar, text="Filtre:", bg=HEADER_BG, font=FONT_LABEL,
+                 fg=TEXT_DIM).pack(side=tk.LEFT, padx=(10, 3), pady=2)
+        for m in self.FILTER_MODES:
+            btn = tk.Button(fbar, text=self.FILTER_LABELS[m],
+                            font=("Consolas", 7),
+                            fg=COL_GREEN if m == self._mode else TEXT_DIM,
+                            bg=PANEL_BG, relief=tk.FLAT, padx=4, pady=1,
+                            command=lambda mode=m: self._set_mode(mode))
+            btn.pack(side=tk.LEFT, padx=1, pady=2)
+            btn._mode = m
+        self._color_btn = tk.Button(fbar, text="Color",
+                                    font=("Consolas", 7), fg=COL_GREEN,
+                                    bg=PANEL_BG, relief=tk.FLAT, padx=4, pady=1,
+                                    command=self._toggle_color)
+        self._color_btn.pack(side=tk.LEFT, padx=(6, 0), pady=2)
+
+        # Canvas pour l'image sonar
+        self._canvas = tk.Canvas(self, bg='black', highlightthickness=0)
+        self._canvas.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+
+        # Metadata en bas
+        info_frame = tk.Frame(self, bg=PANEL_BG)
+        info_frame.pack(fill=tk.X, padx=6, pady=(0, 2))
+        self._info_vars = {}
+        for i, (key, label) in enumerate([
+            ('frequency_hz', 'Freq'), ('temperature_c', 'Temp'),
+            ('range_m', 'Range'), ('gain_percent', 'Gain'),
+        ]):
+            tk.Label(info_frame, text=f"{label}:", bg=PANEL_BG,
+                     font=("Consolas", 8), fg=TEXT_DIM).grid(
+                         row=0, column=i*2, sticky='e', padx=1)
+            var = tk.StringVar(value="---")
+            tk.Label(info_frame, textvariable=var, bg=PANEL_BG,
+                     font=("Consolas", 8, "bold"), fg=TEXT_VAL).grid(
+                         row=0, column=i*2+1, sticky='w', padx=(1, 6))
+            self._info_vars[key] = var
+
+        # Statut
+        stat = tk.Frame(self, bg=HEADER_BG)
+        stat.pack(fill=tk.X, side=tk.BOTTOM)
+        self._status_var = tk.StringVar(value="En attente du sonar...")
+        tk.Label(stat, textvariable=self._status_var,
+                 bg=HEADER_BG, font=FONT_CLOCK, fg=TEXT_DIM
+                 ).pack(side=tk.LEFT, padx=10, pady=3)
+
+    def _set_mode(self, mode):
+        self._mode = mode
+        for w in self.winfo_children():
+            if isinstance(w, tk.Frame):
+                for btn in w.winfo_children():
+                    if isinstance(btn, tk.Button) and hasattr(btn, '_mode'):
+                        btn.configure(
+                            fg=COL_GREEN if btn._mode == mode else TEXT_DIM)
+
+    def _toggle_color(self):
+        self._use_color = not self._use_color
+        self._color_btn.configure(
+            fg=COL_GREEN if self._use_color else TEXT_DIM)
+
+    def _do_connect(self):
+        ip = self._ip_var.get().strip()
+        if not ip:
+            self._status_var.set("Entrer une adresse IP")
+            return
+        if self._on_connect:
+            self._on_connect(ip)
+        self._dot.config(fg=COL_YELLOW)
+
+    def set_status(self, text):
+        self._status_var.set(text)
+
+    def update_data(self, data):
+        status = data.get('status', 'unknown')
+        if status != 'ok':
+            if status == 'error':
+                self._dot.config(fg=COL_RED)
+                self._status_var.set(f"Erreur: {data.get('error', '?')[:50]}")
+            return
+
+        self._dot.config(fg=COL_GREEN)
+        self._ts_var.set(data.get('timestamp', '--:--:--'))
+
+        # Mettre a jour les metadata
+        fields = data.get('fields', {})
+        for key, var in self._info_vars.items():
+            if key in fields:
+                entry = fields[key]
+                unit = entry.get('unit', '')
+                var.set(f"{entry.get('display', '---')} {unit}".strip())
+
+        # Reconstruire et afficher l'image sonar
+        img_b64 = data.get('image_b64')
+        img_shape = data.get('image_shape')
+        if img_b64 and img_shape:
+            try:
+                raw = base64.b64decode(img_b64)
+                img = np.frombuffer(raw, dtype=np.uint8).reshape(img_shape)
+                self._render_fan(img)
+                self._frame_count += 1
+                self._status_var.set(
+                    f"Connecte  ●  {img_shape[0]}x{img_shape[1]}  "
+                    f"[{self._mode}]  frame #{self._frame_count}")
+            except Exception:
+                pass
+
+    def _render_fan(self, img_gray):
+        cw = max(self._canvas.winfo_width(), 200)
+        ch = max(self._canvas.winfo_height(), 200)
+        nr, nb = img_gray.shape
+
+        if self._fan_lut is None or self._fan_size != (cw, ch):
+            self._fan_size = (cw, ch)
+            self._fan_lut = build_fan_lut(nr, nb, FOV_DEG, cw, ch)
+
+        enhanced = enhance_image(img_gray, self._mode)
+        ri, bi, valid = self._fan_lut
+
+        if self._use_color:
+            rgb_lut = SONAR_COLORMAP[enhanced]
+            out = np.zeros((ch, cw, 3), dtype=np.uint8)
+            out[valid] = rgb_lut[ri[valid], bi[valid]]
+            pil = PILImage.fromarray(out, mode='RGB')
+        else:
+            out = np.zeros((ch, cw), dtype=np.uint8)
+            out[valid] = enhanced[ri[valid], bi[valid]]
+            pil = PILImage.fromarray(out, mode='L')
+
+        # Arcs de distance et lignes de bord
+        draw = ImageDraw.Draw(pil)
+        cx_f, cy_f = cw / 2.0, 10.0
+        max_r = ch - cy_f - 10
+        half_fov = FOV_DEG / 2.0
+        for frac in [0.25, 0.5, 0.75, 1.0]:
+            r = max_r * frac
+            bbox = [cx_f - r, cy_f - r, cx_f + r, cy_f + r]
+            draw.arc(bbox, start=90 - half_fov, end=90 + half_fov,
+                     fill=(40, 60, 80), width=1)
+        for angle_deg in [-half_fov, half_fov]:
+            angle_rad = math.radians(angle_deg)
+            ex = cx_f + max_r * math.sin(angle_rad)
+            ey = cy_f + max_r * math.cos(angle_rad)
+            draw.line([(cx_f, cy_f), (ex, ey)], fill=(40, 60, 80), width=1)
+
+        self._photo = ImageTk.PhotoImage(pil)
+        self._canvas.delete('all')
+        self._canvas.create_image(0, 0, anchor='nw', image=self._photo)
+
+
 # ─── Application principale ───────────────────────────────────────────────────
 
 class HMIApp:
@@ -280,17 +499,19 @@ class HMIApp:
         ]),
     ]
 
-    # Définition des groupes Aquadopp
+    # Définition des groupes Aquadopp (disposition du test_aquadopp_sans_ros2 validé)
     AQUADOPP_GROUPS = [
-        ("Environnement", [
-            ("speed_of_sound_ms", "Vitesse du son", "m/s"),
-            ("temperature_c",     "Température",    "°C"),
-            ("pressure_dbar",     "Pression",       "dbar"),
+        ("Acoustics", [
+            ("speed_of_sound_ms", "Speed of Sound", "m/s"),
+        ]),
+        ("Environment", [
+            ("temperature_c", "Temperature", "°C"),
+            ("pressure_dbar", "Pressure",    "dbar"),
         ]),
         ("Orientation", [
-            ("heading_deg", "Cap (Heading)", "°"),
-            ("pitch_deg",   "Pitch",         "°"),
-            ("roll_deg",    "Roll",          "°"),
+            ("heading_deg", "Heading", "°"),
+            ("pitch_deg",   "Pitch",   "°"),
+            ("roll_deg",    "Roll",    "°"),
         ]),
     ]
 
@@ -367,6 +588,7 @@ class HMIApp:
         'sbe37':    'sbe37_node',
         'rbrcoda3': 'rbrcoda3_node',
         'airmar':   'airmar_node',
+        'oculus':   'oculus_node',
     }
 
     def __init__(self, node: 'SensorsHMINode'):
@@ -489,7 +711,15 @@ class HMIApp:
             on_stop=lambda: self._stop('airmar'),
             default_baud=4800, width=PANEL_MIN_WIDTH)
         self._air_panel.pack_propagate(False)
-        self._air_panel.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 0))
+        self._air_panel.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 5))
+
+        self._oculus_panel = OculusPanel(
+            cols,
+            on_connect=lambda ip: self._connect_oculus(ip),
+            on_stop=lambda: self._stop('oculus'),
+            width=int(PANEL_MIN_WIDTH * 1.5))
+        self._oculus_panel.pack_propagate(False)
+        self._oculus_panel.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 0))
 
         # ── Barre du bas ──────────────────────────────────────────────────────
         bot = tk.Frame(self._root, bg=HEADER_BG, pady=3)
@@ -508,10 +738,11 @@ class HMIApp:
 
     # ── Lancement / arrêt des nodes capteurs ──────────────────────────────────
 
-    def _panel_of(self, sensor: str) -> SensorPanel:
+    def _panel_of(self, sensor: str):
         return {'aanderaa': self._a_panel, 'aquadopp': self._q_panel,
                 'sbe37': self._s_panel, 'rbrcoda3': self._r_panel,
-                'airmar': self._air_panel}[sensor]
+                'airmar': self._air_panel,
+                'oculus': self._oculus_panel}[sensor]
 
     def _connect(self, sensor: str, port: str, baud: int) -> None:
         """Clic sur Connecter : lance le node s'il ne tourne pas, sinon
@@ -536,6 +767,27 @@ class HMIApp:
         self._node.get_logger().info(f"Node {sensor} lancé — {port} @ {baud}")
         self._panel_of(sensor).set_status(f"Node lancé — connexion à {port} @ {baud}...")
 
+    def _connect_oculus(self, ip: str) -> None:
+        """Clic sur Connecter Oculus : lance le node avec l'IP configuree."""
+        proc = self._procs.get('oculus')
+        ihm_proc_alive = proc is not None and proc.poll() is None
+
+        if ihm_proc_alive or self._node.last_msg_age('oculus') < 10.0:
+            self._node.send_set_ip('oculus', ip)
+            self._oculus_panel.set_status(f"Reconnexion → {ip}...")
+            return
+
+        cmd = ['ros2', 'run', 'marble_sensors_hmi', 'oculus_node',
+               '--ros-args', '-p', f'ip:={ip}']
+        kwargs = {'start_new_session': True} if os.name == 'posix' else {}
+        try:
+            self._procs['oculus'] = subprocess.Popen(cmd, **kwargs)
+        except FileNotFoundError:
+            self._oculus_panel.set_status("⚠ commande 'ros2' introuvable")
+            return
+        self._node.get_logger().info(f"Node oculus lancé — {ip}")
+        self._oculus_panel.set_status(f"Node lancé — connexion à {ip}...")
+
     def _stop(self, sensor: str) -> None:
         """Clic sur ■ : arrête le node lancé par l'IHM."""
         proc = self._procs.pop(sensor, None)
@@ -556,7 +808,7 @@ class HMIApp:
 
     def _tick(self) -> None:
         self._clock_var.set(time.strftime("%Y-%m-%d  %H:%M:%S"))
-        a_data, q_data, s_data, r_data, air_data = self._node.get_data()
+        a_data, q_data, s_data, r_data, air_data, oculus_data = self._node.get_data()
         if a_data:
             self._a_panel.update_data(a_data)
         if q_data:
@@ -567,6 +819,8 @@ class HMIApp:
             self._r_panel.update_data(r_data)
         if air_data:
             self._air_panel.update_data(air_data)
+        if oculus_data:
+            self._oculus_panel.update_data(oculus_data)
         self._root.after(500, self._tick)
 
     def _on_close(self) -> None:
@@ -598,6 +852,7 @@ class SensorsHMINode(Node):
         self._sbe37     = None
         self._rbrcoda3  = None
         self._airmar    = None
+        self._oculus    = None
         self._last_rx   = {}   # sensor → instant du dernier message reçu
 
         self.create_subscription(String, 'aanderaa/data',  self._cb_aanderaa,  10)
@@ -605,6 +860,7 @@ class SensorsHMINode(Node):
         self.create_subscription(String, 'sbe37/data',     self._cb_sbe37,     10)
         self.create_subscription(String, 'rbrcoda3/data',  self._cb_rbrcoda3,  10)
         self.create_subscription(String, 'airmar/data',    self._cb_airmar,    10)
+        self.create_subscription(String, 'oculus/data',    self._cb_oculus,    10)
 
         # Publishers pour demander aux nodes de changer de port à chaud
         self._port_pubs = {
@@ -613,6 +869,7 @@ class SensorsHMINode(Node):
             'sbe37':    self.create_publisher(String, 'sbe37/set_port',    10),
             'rbrcoda3': self.create_publisher(String, 'rbrcoda3/set_port', 10),
             'airmar':   self.create_publisher(String, 'airmar/set_port',   10),
+            'oculus':   self.create_publisher(String, 'oculus/set_ip',     10),
         }
 
         self.get_logger().info("HMI node démarré — en attente des données capteurs")
@@ -622,6 +879,12 @@ class SensorsHMINode(Node):
         msg.data = json.dumps({'port': port, 'baud': baud})
         self._port_pubs[sensor].publish(msg)
         self.get_logger().info(f"set_port {sensor} → {port} @ {baud}")
+
+    def send_set_ip(self, sensor: str, ip: str) -> None:
+        msg = String()
+        msg.data = json.dumps({'ip': ip})
+        self._port_pubs[sensor].publish(msg)
+        self.get_logger().info(f"set_ip {sensor} → {ip}")
 
     def last_msg_age(self, sensor: str) -> float:
         """Secondes depuis le dernier message du capteur (inf si jamais reçu)."""
@@ -668,6 +931,14 @@ class SensorsHMINode(Node):
         except json.JSONDecodeError as e:
             self.get_logger().warn(f"JSON Airmar invalide : {e}")
 
+    def _cb_oculus(self, msg: String) -> None:
+        self._last_rx['oculus'] = time.time()
+        try:
+            with self._lock:
+                self._oculus = json.loads(msg.data)
+        except json.JSONDecodeError as e:
+            self.get_logger().warn(f"JSON Oculus invalide : {e}")
+
     def get_data(self):
         with self._lock:
             return (
@@ -676,6 +947,7 @@ class SensorsHMINode(Node):
                 dict(self._sbe37)     if self._sbe37     else {},
                 dict(self._rbrcoda3)  if self._rbrcoda3  else {},
                 dict(self._airmar)    if self._airmar    else {},
+                dict(self._oculus)    if self._oculus    else {},
             )
 
 

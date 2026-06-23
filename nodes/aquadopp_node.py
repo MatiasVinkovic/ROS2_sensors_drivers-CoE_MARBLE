@@ -1,4 +1,16 @@
 #!/usr/bin/env python3
+"""
+Aquadopp S4VP — NODE ROS2
+=========================
+Boucle d'acquisition validée (cf. test_aquadopp_sans_ros2.py) adaptée en node :
+  - ouverture du port série
+  - BREAK + SETDEFAULT,CONFIG -> mode commande
+  - configuration du plan de mesure -> START
+  - lecture des trames binaires -> parsing -> publication JSON sur 'aquadopp/data'
+
+Changement de port à chaud depuis l'IHM via le topic 'aquadopp/set_port'.
+"""
+
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
@@ -8,9 +20,17 @@ import time
 import json
 import threading
 
-from marble_sensors_hmi.drivers.aquadopp_driver import (
-    flush, cmd, enter_command_mode, configure, capture_burst, read_packet, parse_packet
-)
+# Import du driver : fonctionne en local (dossier plat) comme dans le package ROS.
+try:
+    from aquadopp_driver import (
+        flush, enter_command_mode, configure, start_measurement,
+        capture_burst, read_packet, parse_packet,
+    )
+except ImportError:
+    from marble_sensors_hmi.drivers.aquadopp_driver import (
+        flush, enter_command_mode, configure, start_measurement,
+        capture_burst, read_packet, parse_packet,
+    )
 
 _FIELD_FMT = {
     'speed_of_sound_ms': ('.2f', 'm/s'),
@@ -89,18 +109,14 @@ class AquadoppNode(Node):
                 if not configure(conn, self.get_logger()):
                     self.get_logger().warn("Configuration partielle — on continue")
 
-                conn.reset_input_buffer()
-                conn.write(b'START\r\n')
-                time.sleep(0.5)
-                start_resp = flush(conn, 0.5).decode('ascii', errors='replace')
-                if 'OK' not in start_resp:
-                    self._publish({'status': 'error', 'error': f'START refusé : {start_resp[:30]}'})
+                if not start_measurement(conn):
+                    self._publish({'status': 'error', 'error': 'START refusé'})
                     conn.close()
                     self._sleep(5.0)
                     continue
 
                 capture_burst(conn, idle_s=2.0, max_wait_s=20.0)
-                self.get_logger().info("Mesure démarrée — attente des paquets binaires (~60 s)")
+                self.get_logger().info("Mesure démarrée — attente des paquets binaires (~30 s)")
 
                 while self._running and not self._reconnect:
                     raw = read_packet(conn, self.get_logger(), timeout_s=300)
