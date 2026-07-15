@@ -6,14 +6,14 @@ import os
 
 def generate_launch_description():
     config_file = os.path.join(
-        get_package_share_directory('marble_rbrcoda3'),
+        get_package_share_directory('rbrcoda3'),
         'config',
         'rbrcoda3.yaml'
     )
 
     return LaunchDescription([
         Node(
-            package='marble_rbrcoda3',
+            package='rbrcoda3',
             executable='rbrcoda3_node',
             name='rbrcoda3_node',
             output='screen',
