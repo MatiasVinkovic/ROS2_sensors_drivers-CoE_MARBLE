@@ -1,0 +1,8 @@
+rbrcoda3_node:
+  ros__parameters:
+    port: "/dev/coda3"
+    baudrate: 9600
+    sample_interval: 0.0
+    atmosphere_dbar: 10.1325
+    density_kg_m3: 1026.0
+    temperature_unit: "F"

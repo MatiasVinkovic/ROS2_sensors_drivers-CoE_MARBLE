@@ -1,0 +1,20 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>marble_rbrcoda3</name>
+  <version>0.0.1</version>
+  <description>ROS 2 Python driver for the RBRcoda3 sensor.</description>
+
+  <maintainer email="mativink@gmail.com"></maintainer>
+  <license>TODO</license>
+
+  <buildtool_depend>ament_python</buildtool_depend>
+
+  <depend>rclpy</depend>
+  <depend>std_msgs</depend>
+
+  <exec_depend>python3-serial</exec_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
