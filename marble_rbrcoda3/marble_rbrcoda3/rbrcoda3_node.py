@@ -20,7 +20,7 @@ from std_msgs.msg import String
 #     wakeup,
 # )
 
-from marble_rbrcoda3.rbrcoda3_driver import (
+from rbrcoda3.rbrcoda3_driver import (
     ATMOSPHERE_DBAR,
     SEAWATER_DENSITY,
     cmd,
@@ -30,6 +30,7 @@ from marble_rbrcoda3.rbrcoda3_driver import (
     sea_pressure,
     wakeup,
 )
+
 
 _STREAM_TIMEOUT_S = 5.0
 
