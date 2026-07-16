@@ -1,0 +1,4 @@
+float64 amount_mm
+int32 duration_sec
+float64 rate_mmph
+float64 peak_rate_mmph

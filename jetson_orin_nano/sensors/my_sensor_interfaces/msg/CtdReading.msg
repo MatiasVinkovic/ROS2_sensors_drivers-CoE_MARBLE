@@ -1,0 +1,7 @@
+float64 temperature_c
+float64 conductivity_spm
+float64 pressure_dbar
+string timestamp
+float64 salinity_psu
+float64 sound_velocity_mps
+float64 density_kgm3

@@ -1,0 +1,7 @@
+<launch>
+
+    <node pkg="motus_wave_sensor" exec="motus_driver" name="motus_driver">
+        <param from="$(find-pkg-share my_sensor_bringup)/config/motus_params.yaml" />
+    </node>
+
+</launch>

@@ -1,0 +1,9 @@
+<launch>
+
+    <include file="$(find-pkg-share my_sensor_bringup)/launch/temperature_sensor.launch.xml" />
+    <include file="$(find-pkg-share my_sensor_bringup)/launch/weatherstation.launch.xml" />
+    <include file="$(find-pkg-share my_sensor_bringup)/launch/microcat.launch.xml" />
+    <include file="$(find-pkg-share my_sensor_bringup)/launch/motus.launch.xml" />
+    <include file="$(find-pkg-share my_sensor_bringup)/launch/oculus.launch.xml" />
+
+</launch>

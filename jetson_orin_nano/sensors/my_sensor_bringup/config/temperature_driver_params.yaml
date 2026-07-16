@@ -1,0 +1,5 @@
+temperature_driver:
+  ros__parameters:
+    serial_port: "/dev/rbr_sensor"
+    baud_rate: 9600
+    frame_id: "rbr_coda3_sensor"

@@ -1,0 +1,7 @@
+<launch>
+
+    <node pkg="oculus_sonar" exec="oculus_node" name="oculus_node">
+        <param from="$(find-pkg-share my_sensor_bringup)/config/oculus_params.yaml" />
+    </node>
+
+</launch>

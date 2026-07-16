@@ -1,0 +1,6 @@
+motus_driver:
+  ros__parameters:
+    serial_port: "/dev/motus_sensor"
+    baud_rate: 115200
+    frame_id: "motus_wave_sensor"
+    silence_gap_sec: 1.0

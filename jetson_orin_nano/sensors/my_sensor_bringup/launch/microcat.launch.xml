@@ -1,0 +1,7 @@
+<launch>
+
+    <node pkg="sbe37_microcat" exec="microcat_driver" name="microcat_driver">
+        <param from="$(find-pkg-share my_sensor_bringup)/config/microcat_params.yaml" />
+    </node>
+
+</launch>

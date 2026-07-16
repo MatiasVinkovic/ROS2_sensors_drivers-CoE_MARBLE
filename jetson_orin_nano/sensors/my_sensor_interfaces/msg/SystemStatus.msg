@@ -1,0 +1,3 @@
+float64 input_voltage
+float64 input_current_ma
+int32 memory_used_bytes

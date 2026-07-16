@@ -1,0 +1,5 @@
+weatherstation_driver:
+  ros__parameters:
+    serial_port: "/dev/weatherstation"
+    baud_rate: 4800
+    frame_id: "weatherstation"

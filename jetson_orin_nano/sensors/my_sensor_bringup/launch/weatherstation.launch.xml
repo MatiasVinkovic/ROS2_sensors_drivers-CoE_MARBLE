@@ -1,0 +1,7 @@
+<launch>
+
+    <node pkg="airmar_weatherstation" exec="weatherstation_driver" name="weatherstation_driver">
+        <param from="$(find-pkg-share my_sensor_bringup)/config/weatherstation_params.yaml" />
+    </node>
+
+</launch>

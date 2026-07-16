@@ -1,0 +1,7 @@
+<launch>
+
+    <node pkg="rbr_temperature_sensor" exec="temperature_driver" name="temperature_driver">
+        <param from="$(find-pkg-share my_sensor_bringup)/config/temperature_driver_params.yaml" />
+    </node>
+
+</launch>

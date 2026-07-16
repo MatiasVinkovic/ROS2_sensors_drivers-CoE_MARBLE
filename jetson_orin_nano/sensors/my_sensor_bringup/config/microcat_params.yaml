@@ -1,0 +1,5 @@
+microcat_driver:
+  ros__parameters:
+    serial_port: "/dev/microcat"
+    baud_rate: 9600
+    sample_period: 4.0
