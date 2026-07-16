@@ -1,0 +1,5 @@
+sbe37_node:
+  ros__parameters:
+    port: "/dev/ttyUSB0"
+    baud: 9600
+    sample_interval: 10.0
