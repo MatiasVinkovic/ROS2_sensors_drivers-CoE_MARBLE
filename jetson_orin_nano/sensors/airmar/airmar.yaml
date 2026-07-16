@@ -1,0 +1,5 @@
+airmar_node:
+  ros__parameters:
+    port: "/dev/ttyUSB0"
+    baud: 4800
+    sample_interval: 0.0
